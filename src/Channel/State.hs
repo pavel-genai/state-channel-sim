@@ -6,7 +6,6 @@ module Channel.State
   , activateChannel
     -- * Off-chain operations
   , createPayment
-  , applyPayment
     -- * Closing
   , cooperativeClose
   , unilateralClose
