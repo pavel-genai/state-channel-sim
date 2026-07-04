@@ -1,5 +1,7 @@
 # State Channel Simulator
 
+[![CI](https://github.com/pavel-genai/state-channel-sim/actions/workflows/ci.yml/badge.svg)](https://github.com/pavel-genai/state-channel-sim/actions/workflows/ci.yml)
+
 A Haskell simulation of a blockchain payment channel (state channel) with
 off-chain state transitions, Ed25519 cryptographic signatures, dispute
 resolution, and challenge periods.
