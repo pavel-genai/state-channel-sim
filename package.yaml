@@ -1,0 +1,52 @@
+name:                state-channel-sim
+version:             0.1.0.0
+synopsis:            Blockchain payment channel (state channel) simulator
+description:         A Haskell simulation of a blockchain payment channel with off-chain
+                     state transitions, Ed25519 signatures, dispute resolution, and
+                     challenge periods.
+license:             MIT
+author:              Pavel
+maintainer:          pavel@example.com
+
+dependencies:
+- base >= 4.7 && < 5
+- bytestring >= 0.11
+- crypton >= 0.34
+- memory >= 0.18
+- text >= 2.0
+- time >= 1.12
+
+ghc-options:
+- -Wall
+- -Wcompat
+
+library:
+  source-dirs: src
+  exposed-modules:
+  - Channel.Types
+  - Channel.State
+  - Channel.Crypto
+  - Channel.Dispute
+
+executables:
+  state-channel-sim:
+    main:                Main.hs
+    source-dirs:         app
+    dependencies:
+    - state-channel-sim
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+
+tests:
+  state-channel-sim-test:
+    main:                Spec.hs
+    source-dirs:         test
+    dependencies:
+    - state-channel-sim
+    - hspec >= 2.11
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N

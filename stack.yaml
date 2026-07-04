@@ -1,0 +1,9 @@
+resolver: lts-22.43
+
+packages:
+- .
+
+extra-deps:
+  - crypton-0.34
+  - crypton-x509-1.7.6
+  - memory-0.18.0
