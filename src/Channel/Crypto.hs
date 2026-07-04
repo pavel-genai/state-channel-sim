@@ -19,7 +19,6 @@ import           Channel.Types
 import           Crypto.Error          (CryptoFailable(..))
 import           Crypto.PubKey.Ed25519 (PublicKey, SecretKey, Signature)
 import qualified Crypto.PubKey.Ed25519 as Ed25519
-import           Data.ByteArray        (convert)
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as BS
 import qualified Data.ByteString.Char8 as BC

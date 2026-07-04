@@ -18,8 +18,8 @@ module Channel.State
 import           Channel.Crypto
 import           Channel.Types
 
-import qualified Data.ByteString       as BS
-import qualified Data.ByteString.Char8 as BC
+import           Crypto.PubKey.Ed25519 (PublicKey)
+import           Data.ByteString       (ByteString)
 import           Data.Time.Clock       (UTCTime, addUTCTime)
 
 -- | Open a new channel with Party A's deposit. Channel starts in Open status.
