@@ -59,7 +59,7 @@ data SignedState = SignedState
   { ssState :: !ChannelState
   , ssSigA  :: !Signature    -- ^ Party A's signature
   , ssSigB  :: !Signature    -- ^ Party B's signature
-  } deriving (Show)
+  } deriving (Show, Eq)
 
 -- | The full payment channel.
 data Channel = Channel
@@ -72,7 +72,7 @@ data Channel = Channel
   , chDisputeState  :: !(Maybe SignedState)  -- ^ State submitted in dispute
   , chDisputeDeadline :: !(Maybe UTCTime)    -- ^ Challenge period end
   , chConfig        :: !ChannelConfig  -- ^ Channel configuration
-  } deriving (Show)
+  } deriving (Show, Eq)
 
 -- | Errors that can occur during channel operations.
 data ChannelError
@@ -91,7 +91,7 @@ data ChannelError
 -- | Configuration for a channel.
 data ChannelConfig = ChannelConfig
   { ccChallengePeriod :: !NominalDiffTime  -- ^ Duration of challenge window
-  } deriving (Show)
+  } deriving (Show, Eq)
 
 -- | Default configuration with a 24-hour challenge period.
 defaultConfig :: ChannelConfig
