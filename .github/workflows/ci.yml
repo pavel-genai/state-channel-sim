@@ -12,4 +12,14 @@ jobs:
           ghc-version: '9.6'
           enable-stack: true
       - run: stack build --system-ghc
-      - run: stack test --system-ghc
+      - run: stack test --system-ghc --coverage
+      - name: Install hpc-lcov
+        run: stack install hpc-lcov --system-ghc
+      - name: Convert coverage to lcov format
+        run: stack exec -- hpc-lcov --output lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
