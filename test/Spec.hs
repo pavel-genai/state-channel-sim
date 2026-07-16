@@ -28,13 +28,26 @@ makeTestKeys seed =
     Right keys -> keys
     Left err   -> error $ "Failed to create test keys: " ++ err
 
+-- | Extract the 'Right' value from an 'Either', failing the test loudly if it
+-- is a 'Left'. Using this instead of @case ... of Left err -> expectationFailure@
+-- keeps the happy-path branches fully covered by HPC.
+fromRight' :: Show e => Either e a -> a
+fromRight' (Right a) = a
+fromRight' (Left e)  = error ("expected Right, got Left: " ++ show e)
+
+-- | Extract the 'Just' value from a 'Maybe', failing the test loudly if it is
+-- 'Nothing'.
+fromJust' :: Maybe a -> a
+fromJust' (Just a)  = a
+fromJust' Nothing   = error "expected Just, got Nothing"
+
 -- | Set up a full active channel for testing.
 setupActiveChannel :: (Channel, PartyKeys, PartyKeys)
 setupActiveChannel =
   let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
       keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-      Right ch1 = openChannel "test-chan" keysA (pkPublic keysB) 1000 testConfig
-      Right ch2 = activateChannel ch1 keysA keysB 500
+      ch1 = fromRight' (openChannel "test-chan" keysA (pkPublic keysB) 1000 testConfig)
+      ch2 = fromRight' (activateChannel ch1 keysA keysB 500)
   in  (ch2, keysA, keysB)
 
 -- | Set up an active channel and make a payment, returning the channel,
@@ -42,15 +55,93 @@ setupActiveChannel =
 setupWithPayment :: (Channel, PartyKeys, PartyKeys, SignedState)
 setupWithPayment =
   let (ch, keysA, keysB) = setupActiveChannel
-      Right (ch', ss) = createPayment ch keysA keysB PartyA 200
+      (ch', ss) = fromRight' (createPayment ch keysA keysB PartyA 200)
   in  (ch', keysA, keysB, ss)
 
 -- | Set up a disputed channel for testing dispute-related functions.
 setupDisputedChannel :: (Channel, PartyKeys, PartyKeys, SignedState)
 setupDisputedChannel =
   let (ch', keysA, keysB, ss) = setupWithPayment
-      Right disputed = unilateralClose ch' ss t0
+      disputed = fromRight' (unilateralClose ch' ss t0)
   in  (disputed, keysA, keysB, ss)
+
+-- | Construct an Active channel whose latest signed state is missing. This is
+-- not reachable through the public API (activation always sets a state) but is
+-- used to exercise the defensive @Left ChannelNotFound@ branches.
+mkActiveChannelNoState :: Channel
+mkActiveChannelNoState =
+  let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+  in Channel
+       { chId              = "no-state"
+       , chStatus          = Active
+       , chPartyA          = pkPublic keysA
+       , chPartyB          = pkPublic keysB
+       , chDeposits        = Balance 1000 500
+       , chLatestState     = Nothing
+       , chDisputeState    = Nothing
+       , chDisputeDeadline = Nothing
+       , chConfig          = testConfig
+       }
+
+-- | Construct a Disputed channel whose dispute state is missing, to exercise
+-- the defensive @Left ChannelNotFound@ branch in 'counterDispute'.
+mkDisputedChannelNoDisputeState :: Channel
+mkDisputedChannelNoDisputeState =
+  let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+  in Channel
+       { chId              = "no-dispute-state"
+       , chStatus          = Disputed
+       , chPartyA          = pkPublic keysA
+       , chPartyB          = pkPublic keysB
+       , chDeposits        = Balance 1000 500
+       , chLatestState     = Nothing
+       , chDisputeState    = Nothing
+       , chDisputeDeadline = Just (addUTCTime 10 t0)
+       , chConfig          = testConfig
+       }
+
+-- | Construct a Disputed channel whose dispute deadline is missing, to
+-- exercise the defensive @Left ChannelNotFound@ branch in 'resolveDispute'.
+mkDisputedChannelNoDeadline :: Channel
+mkDisputedChannelNoDeadline =
+  let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+  in Channel
+       { chId              = "no-deadline"
+       , chStatus          = Disputed
+       , chPartyA          = pkPublic keysA
+       , chPartyB          = pkPublic keysB
+       , chDeposits        = Balance 1000 500
+       , chLatestState     = Nothing
+       , chDisputeState    = Nothing
+       , chDisputeDeadline = Nothing
+       , chConfig          = testConfig
+       }
+
+-- | Construct an Active channel whose latest signed state carries invalid
+-- signatures, to exercise the @Left (InvalidSignature PartyA)@ branch of
+-- 'cooperativeClose'.
+mkActiveChannelBadSigs :: (Channel, PartyKeys, PartyKeys)
+mkActiveChannelBadSigs =
+  let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+      keysC = makeTestKeys "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+      st    = ChannelState 0 (Balance 1000 500)
+      ss    = SignedState st (signState keysC st) (signState keysB st)
+      ch    = Channel
+        { chId              = "bad-sigs"
+        , chStatus          = Active
+        , chPartyA          = pkPublic keysA
+        , chPartyB          = pkPublic keysB
+        , chDeposits        = Balance 1000 500
+        , chLatestState     = Just ss
+        , chDisputeState    = Nothing
+        , chDisputeDeadline = Nothing
+        , chConfig          = testConfig
+        }
+  in (ch, keysA, keysB)
 
 main :: IO ()
 main = hspec $ do
@@ -160,7 +251,6 @@ main = hspec $ do
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
           st = ChannelState { csNonce = 1, csBalance = Balance 500 500 }
           sigB = signState keysB st
-      -- Verify A's key against B's signature should fail
       verifySignature (pkPublic keysA) st sigB `shouldBe` False
 
     it "rejects signature for different state" $ do
@@ -168,7 +258,6 @@ main = hspec $ do
           st1 = ChannelState { csNonce = 1, csBalance = Balance 500 500 }
           st2 = ChannelState { csNonce = 2, csBalance = Balance 500 500 }
           sig1 = signState keys st1
-      -- Signature for st1 should not verify against st2
       verifySignature (pkPublic keys) st2 sig1 `shouldBe` False
 
     it "rejects signature for state with different balances" $ do
@@ -226,14 +315,10 @@ main = hspec $ do
 
     it "signStateBytes signs raw bytes correctly" $ do
       let keys = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-          msg = "test message"
-          sig = signStateBytes (pkSecret keys) (pkPublic keys) msg
-      -- Verify using Ed25519 directly
-      let st = ChannelState { csNonce = 0, csBalance = Balance 0 0 }
+          st = ChannelState { csNonce = 0, csBalance = Balance 0 0 }
           encoded = encodeState st
           sigFromState = signStateBytes (pkSecret keys) (pkPublic keys) encoded
           sigFromSign = signState keys st
-      -- Both methods should produce the same signature for the same data
       sigFromState `shouldBe` sigFromSign
 
     it "verifySignedState accepts correctly double-signed state" $ do
@@ -250,7 +335,7 @@ main = hspec $ do
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
           keysC = makeTestKeys "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
           st = ChannelState { csNonce = 1, csBalance = Balance 500 500 }
-          sigC = signState keysC st  -- wrong signer
+          sigC = signState keysC st
           sigB = signState keysB st
           signed = SignedState st sigC sigB
       verifySignedState (pkPublic keysA) (pkPublic keysB) signed `shouldBe` False
@@ -261,7 +346,7 @@ main = hspec $ do
           keysC = makeTestKeys "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
           st = ChannelState { csNonce = 1, csBalance = Balance 500 500 }
           sigA = signState keysA st
-          sigC = signState keysC st  -- wrong signer
+          sigC = signState keysC st
           signed = SignedState st sigA sigC
       verifySignedState (pkPublic keysA) (pkPublic keysB) signed `shouldBe` False
 
@@ -282,7 +367,6 @@ main = hspec $ do
           st = ChannelState { csNonce = 1, csBalance = Balance 500 500 }
           sigA = signState keysA st
           sigB = signState keysB st
-          -- Swap: B's sig in A's slot, A's sig in B's slot
           signed = SignedState st sigB sigA
       verifySignedState (pkPublic keysA) (pkPublic keysB) signed `shouldBe` False
 
@@ -293,26 +377,22 @@ main = hspec $ do
     it "opens a channel in Open status" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-      case openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig of
-        Left err -> expectationFailure $ "Expected Right, got: " ++ show err
-        Right ch -> do
-          chStatus ch `shouldBe` Open
-          balanceA (chDeposits ch) `shouldBe` 1000
-          balanceB (chDeposits ch) `shouldBe` 0
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
+      chStatus ch `shouldBe` Open
+      balanceA (chDeposits ch) `shouldBe` 1000
+      balanceB (chDeposits ch) `shouldBe` 0
 
     it "opens a channel with correct ID and keys" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-      case openChannel "my-chan" keysA (pkPublic keysB) 500 testConfig of
-        Left err -> expectationFailure $ show err
-        Right ch -> do
-          chId ch `shouldBe` "my-chan"
-          chPartyA ch `shouldBe` pkPublic keysA
-          chPartyB ch `shouldBe` pkPublic keysB
-          chLatestState ch `shouldBe` Nothing
-          chDisputeState ch `shouldBe` Nothing
-          chDisputeDeadline ch `shouldBe` Nothing
-          chConfig ch `shouldBe` testConfig
+          ch = fromRight' (openChannel "my-chan" keysA (pkPublic keysB) 500 testConfig)
+      chId ch `shouldBe` "my-chan"
+      chPartyA ch `shouldBe` pkPublic keysA
+      chPartyB ch `shouldBe` pkPublic keysB
+      chLatestState ch `shouldBe` Nothing
+      chDisputeState ch `shouldBe` Nothing
+      chDisputeDeadline ch `shouldBe` Nothing
+      chConfig ch `shouldBe` testConfig
 
     it "activates a channel with both deposits" $ do
       let (ch, _keysA, _keysB) = setupActiveChannel
@@ -321,68 +401,52 @@ main = hspec $ do
 
     it "activates channel with correct initial state" $ do
       let (ch, _keysA, _keysB) = setupActiveChannel
-      case chLatestState ch of
-        Nothing -> expectationFailure "Expected initial signed state"
-        Just ss -> do
-          csNonce (ssState ss) `shouldBe` 0
-          csBalance (ssState ss) `shouldBe` Balance 1000 500
+          ss = fromJust' (chLatestState ch)
+      csNonce (ssState ss) `shouldBe` 0
+      csBalance (ssState ss) `shouldBe` Balance 1000 500
 
     it "processes off-chain payments correctly" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-      case createPayment ch keysA keysB PartyA 200 of
-        Left err -> expectationFailure $ show err
-        Right (ch', _) -> do
-          channelBalance ch' `shouldBe` Just (Balance 800 700)
-          case chLatestState ch' of
-            Nothing -> expectationFailure "Expected state"
-            Just ss -> csNonce (ssState ss) `shouldBe` 1
+          (ch', _) = fromRight' (createPayment ch keysA keysB PartyA 200)
+      channelBalance ch' `shouldBe` Just (Balance 800 700)
+      let ss = fromJust' (chLatestState ch')
+      csNonce (ssState ss) `shouldBe` 1
 
     it "processes PartyB payment correctly" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-      case createPayment ch keysA keysB PartyB 100 of
-        Left err -> expectationFailure $ show err
-        Right (ch', _) -> do
-          channelBalance ch' `shouldBe` Just (Balance 1100 400)
-          case chLatestState ch' of
-            Nothing -> expectationFailure "Expected state"
-            Just ss -> csNonce (ssState ss) `shouldBe` 1
+          (ch', _) = fromRight' (createPayment ch keysA keysB PartyB 100)
+      channelBalance ch' `shouldBe` Just (Balance 1100 400)
+      let ss = fromJust' (chLatestState ch')
+      csNonce (ssState ss) `shouldBe` 1
 
     it "processes multiple payments and tracks nonce" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, _) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, _) = createPayment ch1 keysA keysB PartyB 100
-          Right (ch3, _) = createPayment ch2 keysA keysB PartyA 50
+          (ch1, _) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, _) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          (ch3, _) = fromRight' (createPayment ch2 keysA keysB PartyA 50)
       channelBalance ch3 `shouldBe` Just (Balance 850 650)
-      case chLatestState ch3 of
-        Nothing -> expectationFailure "Expected state"
-        Just ss -> csNonce (ssState ss) `shouldBe` 3
+      let ss = fromJust' (chLatestState ch3)
+      csNonce (ssState ss) `shouldBe` 3
 
     it "creates payment that returns valid signed state" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-      case createPayment ch keysA keysB PartyA 200 of
-        Left err -> expectationFailure $ show err
-        Right (_, ss) -> do
-          csNonce (ssState ss) `shouldBe` 1
-          csBalance (ssState ss) `shouldBe` Balance 800 700
-          -- The signed state should be verifiable
-          verifySignedState (pkPublic keysA) (pkPublic keysB) ss `shouldBe` True
+          (_, ss) = fromRight' (createPayment ch keysA keysB PartyA 200)
+      csNonce (ssState ss) `shouldBe` 1
+      csBalance (ssState ss) `shouldBe` Balance 800 700
+      verifySignedState (pkPublic keysA) (pkPublic keysB) ss `shouldBe` True
 
     it "performs cooperative close" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch', _) = createPayment ch keysA keysB PartyA 200
-      case cooperativeClose ch' keysA keysB of
-        Left err -> expectationFailure $ show err
-        Right closed -> do
-          chStatus closed `shouldBe` Closed
-          channelBalance closed `shouldBe` Just (Balance 800 700)
+          (ch', _) = fromRight' (createPayment ch keysA keysB PartyA 200)
+          closed = fromRight' (cooperativeClose ch' keysA keysB)
+      chStatus closed `shouldBe` Closed
+      channelBalance closed `shouldBe` Just (Balance 800 700)
 
     it "cooperative close preserves latest state" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch', ss) = createPayment ch keysA keysB PartyA 300
-      case cooperativeClose ch' keysA keysB of
-        Left err -> expectationFailure $ show err
-        Right closed -> do
-          chLatestState closed `shouldBe` Just ss
+          (ch', ss) = fromRight' (createPayment ch keysA keysB PartyA 300)
+          closed = fromRight' (cooperativeClose ch' keysA keysB)
+      chLatestState closed `shouldBe` Just ss
 
   ---------------------------------------------------------------------------
   -- Channel.State - Error cases
@@ -407,40 +471,40 @@ main = hspec $ do
 
     it "rejects activating a closed channel" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right closed = cooperativeClose ch keysA keysB
+          closed = fromRight' (cooperativeClose ch keysA keysB)
       activateChannel closed keysA keysB 500
         `shouldBe` Left (InvalidChannelStatus Open Closed)
 
     it "rejects activating with zero deposit" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
       activateChannel ch keysA keysB 0
         `shouldBe` Left (InsufficientBalance PartyB 0)
 
     it "rejects activating with negative deposit" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
       activateChannel ch keysA keysB (-50)
         `shouldBe` Left (InsufficientBalance PartyB (-50))
 
     it "rejects payment on non-active channel (Open)" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-x" keysA (pkPublic keysB) 1000 testConfig
+          ch = fromRight' (openChannel "chan-x" keysA (pkPublic keysB) 1000 testConfig)
       createPayment ch keysA keysB PartyA 100
         `shouldBe` Left (InvalidChannelStatus Active Open)
 
     it "rejects payment on closed channel" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right closed = cooperativeClose ch keysA keysB
+          closed = fromRight' (cooperativeClose ch keysA keysB)
       createPayment closed keysA keysB PartyA 100
         `shouldBe` Left (InvalidChannelStatus Active Closed)
 
     it "rejects payment on disputed channel" $ do
       let (ch', keysA, keysB, ss) = setupWithPayment
-          Right disputed = unilateralClose ch' ss t0
+          disputed = fromRight' (unilateralClose ch' ss t0)
       createPayment disputed keysA keysB PartyA 100
         `shouldBe` Left (InvalidChannelStatus Active Disputed)
 
@@ -456,23 +520,18 @@ main = hspec $ do
 
     it "rejects payment exactly at PartyB balance boundary" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-      -- PartyB has 500, paying 501 should fail
       createPayment ch keysA keysB PartyB 501
         `shouldBe` Left (InsufficientBalance PartyB 501)
 
     it "allows payment exactly equal to PartyA balance" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-      case createPayment ch keysA keysB PartyA 1000 of
-        Left err -> expectationFailure $ show err
-        Right (ch', _) ->
-          channelBalance ch' `shouldBe` Just (Balance 0 1500)
+          (ch', _) = fromRight' (createPayment ch keysA keysB PartyA 1000)
+      channelBalance ch' `shouldBe` Just (Balance 0 1500)
 
     it "allows payment exactly equal to PartyB balance" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-      case createPayment ch keysA keysB PartyB 500 of
-        Left err -> expectationFailure $ show err
-        Right (ch', _) ->
-          channelBalance ch' `shouldBe` Just (Balance 1500 0)
+          (ch', _) = fromRight' (createPayment ch keysA keysB PartyB 500)
+      channelBalance ch' `shouldBe` Just (Balance 1500 0)
 
     it "rejects negative/zero payment (0)" $ do
       let (ch, keysA, keysB) = setupActiveChannel
@@ -492,27 +551,26 @@ main = hspec $ do
     it "rejects cooperative close on non-active channel (Open)" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
       cooperativeClose ch keysA keysB
         `shouldBe` Left (InvalidChannelStatus Active Open)
 
     it "rejects cooperative close on closed channel" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right closed = cooperativeClose ch keysA keysB
+          closed = fromRight' (cooperativeClose ch keysA keysB)
       cooperativeClose closed keysA keysB
         `shouldBe` Left (InvalidChannelStatus Active Closed)
 
     it "rejects cooperative close on disputed channel" $ do
       let (ch', keysA, keysB, ss) = setupWithPayment
-          Right disputed = unilateralClose ch' ss t0
+          disputed = fromRight' (unilateralClose ch' ss t0)
       cooperativeClose disputed keysA keysB
         `shouldBe` Left (InvalidChannelStatus Active Disputed)
 
     it "rejects unilateral close on non-active channel (Open)" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
-          -- Create a fake signed state (won't matter since status check comes first)
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
           st = ChannelState 0 (Balance 1000 0)
           sig = signState keysA st
           ss = SignedState st sig sig
@@ -520,7 +578,7 @@ main = hspec $ do
         `shouldBe` Left (InvalidChannelStatus Active Open)
 
     it "rejects unilateral close with invalid signatures" $ do
-      let (ch, keysA, keysB) = setupActiveChannel
+      let (ch, _keysA, keysB) = setupActiveChannel
           keysC = makeTestKeys "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
           st = ChannelState 1 (Balance 800 700)
           sigC = signState keysC st
@@ -531,11 +589,32 @@ main = hspec $ do
 
     it "unilateral close sets correct deadline" $ do
       let (ch', _keysA, _keysB, ss) = setupWithPayment
-      case unilateralClose ch' ss t0 of
-        Left err -> expectationFailure $ show err
-        Right disputed -> do
-          chDisputeDeadline disputed `shouldBe` Just (addUTCTime 10 t0)
-          chDisputeState disputed `shouldBe` Just ss
+          disputed = fromRight' (unilateralClose ch' ss t0)
+      chDisputeDeadline disputed `shouldBe` Just (addUTCTime 10 t0)
+      chDisputeState disputed `shouldBe` Just ss
+
+  ---------------------------------------------------------------------------
+  -- Channel.State - Defensive / inconsistent-state branches
+  ---------------------------------------------------------------------------
+  describe "Channel.State - Defensive branches" $ do
+    it "createPayment returns ChannelNotFound when Active channel has no latest state" $ do
+      let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+          noStateCh = mkActiveChannelNoState
+      createPayment noStateCh keysA keysB PartyA 100
+        `shouldBe` Left ChannelNotFound
+
+    it "cooperativeClose returns ChannelNotFound when Active channel has no latest state" $ do
+      let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+          noStateCh = mkActiveChannelNoState
+      cooperativeClose noStateCh keysA keysB
+        `shouldBe` Left ChannelNotFound
+
+    it "cooperativeClose returns InvalidSignature when latest state has bad signatures" $ do
+      let (badCh, keysA, keysB) = mkActiveChannelBadSigs
+      cooperativeClose badCh keysA keysB
+        `shouldBe` Left (InvalidSignature PartyA)
 
   ---------------------------------------------------------------------------
   -- Channel.State - Queries
@@ -544,7 +623,7 @@ main = hspec $ do
     it "channelBalance returns Nothing for channel with no state" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
       channelBalance ch `shouldBe` Nothing
 
     it "channelBalance returns balance from latest state" $ do
@@ -553,13 +632,13 @@ main = hspec $ do
 
     it "channelBalance updates after payment" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch', _) = createPayment ch keysA keysB PartyA 200
+          (ch', _) = fromRight' (createPayment ch keysA keysB PartyA 200)
       channelBalance ch' `shouldBe` Just (Balance 800 700)
 
     it "totalDeposits is correct for open channel" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
       totalDeposits ch `shouldBe` 1000
 
     it "totalDeposits is correct for active channel" $ do
@@ -568,7 +647,7 @@ main = hspec $ do
 
     it "totalDeposits does not change after payments" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch', _) = createPayment ch keysA keysB PartyA 200
+          (ch', _) = fromRight' (createPayment ch keysA keysB PartyA 200)
       totalDeposits ch' `shouldBe` 1500
 
   ---------------------------------------------------------------------------
@@ -577,18 +656,16 @@ main = hspec $ do
   describe "Channel.Dispute - raiseDispute" $ do
     it "raises dispute on active channel with valid signed state" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch keysA keysB PartyA 200
-      case raiseDispute ch1 ss1 t0 of
-        Left err -> expectationFailure $ show err
-        Right disputed -> do
-          chStatus disputed `shouldBe` Disputed
-          chDisputeState disputed `shouldBe` Just ss1
-          chDisputeDeadline disputed `shouldBe` Just (addUTCTime 10 t0)
+          (ch1, ss1) = fromRight' (createPayment ch keysA keysB PartyA 200)
+          disputed = fromRight' (raiseDispute ch1 ss1 t0)
+      chStatus disputed `shouldBe` Disputed
+      chDisputeState disputed `shouldBe` Just ss1
+      chDisputeDeadline disputed `shouldBe` Just (addUTCTime 10 t0)
 
     it "rejects raiseDispute on non-active channel (Open)" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
           st = ChannelState 0 (Balance 1000 0)
           sig = signState keysA st
           ss = SignedState st sig sig
@@ -597,7 +674,7 @@ main = hspec $ do
 
     it "rejects raiseDispute on closed channel" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right closed = cooperativeClose ch keysA keysB
+          closed = fromRight' (cooperativeClose ch keysA keysB)
           st = ChannelState 0 (Balance 1000 500)
           sigA = signState keysA st
           sigB = signState keysB st
@@ -630,45 +707,38 @@ main = hspec $ do
   describe "Channel.Dispute - counterDispute" $ do
     it "allows counter-dispute with higher nonce" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, ss2) = createPayment ch1 keysA keysB PartyB 100
-          -- Unilateral close with old state (nonce 1)
-          Right disputed = unilateralClose ch2 ss1 t0
-      case counterDispute disputed ss2 (addUTCTime 1 t0) of
-        Left err -> expectationFailure $ show err
-        Right countered -> do
-          case chDisputeState countered of
-            Nothing -> expectationFailure "Expected dispute state"
-            Just ss -> csNonce (ssState ss) `shouldBe` 2
+          (ch1, ss1) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, ss2) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          disputed = fromRight' (unilateralClose ch2 ss1 t0)
+          countered = fromRight' (counterDispute disputed ss2 (addUTCTime 1 t0))
+      let ss = fromJust' (chDisputeState countered)
+      csNonce (ssState ss) `shouldBe` 2
 
     it "rejects counter-dispute with same or lower nonce" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, ss2) = createPayment ch1 keysA keysB PartyB 100
-          -- Unilateral close with newer state (nonce 2)
-          Right disputed = unilateralClose ch2 ss2 t0
-      -- Try to counter with old state (nonce 1)
+          (ch1, ss1) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, ss2) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          disputed = fromRight' (unilateralClose ch2 ss2 t0)
       counterDispute disputed ss1 (addUTCTime 1 t0)
         `shouldBe` Left (OutdatedState 2 1)
 
     it "rejects counter-dispute with same nonce" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch  keysA keysB PartyA 200
-          Right disputed = unilateralClose ch1 ss1 t0
-      -- Try to counter with same state (nonce 1)
+          (ch1, ss1) = fromRight' (createPayment ch keysA keysB PartyA 200)
+          disputed = fromRight' (unilateralClose ch1 ss1 t0)
       counterDispute disputed ss1 (addUTCTime 1 t0)
         `shouldBe` Left (OutdatedState 1 1)
 
     it "rejects counter-dispute on non-disputed channel (Active)" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (_ch1, ss1) = createPayment ch keysA keysB PartyA 200
+          (_ch1, ss1) = fromRight' (createPayment ch keysA keysB PartyA 200)
       counterDispute ch ss1 t0
         `shouldBe` Left (InvalidChannelStatus Disputed Active)
 
     it "rejects counter-dispute on closed channel" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch keysA keysB PartyA 200
-          Right closed = cooperativeClose ch1 keysA keysB
+          (ch1, ss1) = fromRight' (createPayment ch keysA keysB PartyA 200)
+          closed = fromRight' (cooperativeClose ch1 keysA keysB)
       counterDispute closed ss1 t0
         `shouldBe` Left (InvalidChannelStatus Disputed Closed)
 
@@ -684,23 +754,20 @@ main = hspec $ do
 
     it "counter-dispute updates latest state" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, ss2) = createPayment ch1 keysA keysB PartyB 100
-          Right disputed = unilateralClose ch2 ss1 t0
-          Right countered = counterDispute disputed ss2 (addUTCTime 1 t0)
+          (ch1, ss1) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, ss2) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          disputed = fromRight' (unilateralClose ch2 ss1 t0)
+          countered = fromRight' (counterDispute disputed ss2 (addUTCTime 1 t0))
       chLatestState countered `shouldBe` Just ss2
 
     it "counter-dispute resets challenge period" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, ss2) = createPayment ch1 keysA keysB PartyB 100
-          Right disputed = unilateralClose ch2 ss1 t0
-          -- Counter at t+5
+          (ch1, ss1) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, ss2) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          disputed = fromRight' (unilateralClose ch2 ss1 t0)
           t5 = addUTCTime 5 t0
-          Right countered = counterDispute disputed ss2 t5
-      -- Old deadline (t+10) should not be enough for new challenge
+          countered = fromRight' (counterDispute disputed ss2 t5)
       isChallengePeriodExpired countered (addUTCTime 10 t0) `shouldBe` False
-      -- New deadline is t5 + 10 = t+15
       isChallengePeriodExpired countered (addUTCTime 15 t0) `shouldBe` True
 
   ---------------------------------------------------------------------------
@@ -709,53 +776,41 @@ main = hspec $ do
   describe "Channel.Dispute - resolveDispute" $ do
     it "resolves dispute with correct final state after timeout" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, ss2) = createPayment ch1 keysA keysB PartyB 100
-          Right (ch3, ss3) = createPayment ch2 keysA keysB PartyA 50
-          -- B tries with old state
-          Right disputed = unilateralClose ch3 ss1 t0
-          -- A counters with latest
-          Right countered = counterDispute disputed ss3 (addUTCTime 1 t0)
-          -- Wait for challenge period to expire
+          (ch1, ss1) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, _) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          (ch3, ss3) = fromRight' (createPayment ch2 keysA keysB PartyA 50)
+          disputed = fromRight' (unilateralClose ch3 ss1 t0)
+          countered = fromRight' (counterDispute disputed ss3 (addUTCTime 1 t0))
           afterChallenge = addUTCTime 20 t0
-      case resolveDispute countered afterChallenge of
-        Left err -> expectationFailure $ show err
-        Right resolved -> do
-          chStatus resolved `shouldBe` Closed
-          -- Final state should reflect the counter-dispute state (nonce 3)
-          case chLatestState resolved of
-            Nothing -> expectationFailure "Expected final state"
-            Just ss -> do
-              csNonce (ssState ss) `shouldBe` 3
-              csBalance (ssState ss) `shouldBe` Balance 850 650
+          resolved = fromRight' (resolveDispute countered afterChallenge)
+      chStatus resolved `shouldBe` Closed
+      let ss = fromJust' (chLatestState resolved)
+      csNonce (ssState ss) `shouldBe` 3
+      csBalance (ssState ss) `shouldBe` Balance 850 650
 
     it "resolves dispute without counter (original dispute state wins)" $ do
       let (ch', _keysA, _keysB, ss) = setupWithPayment
-          Right disputed = unilateralClose ch' ss t0
+          disputed = fromRight' (unilateralClose ch' ss t0)
           afterChallenge = addUTCTime 20 t0
-      case resolveDispute disputed afterChallenge of
-        Left err -> expectationFailure $ show err
-        Right resolved -> do
-          chStatus resolved `shouldBe` Closed
-          -- The dispute state becomes the latest state
-          chLatestState resolved `shouldBe` chDisputeState disputed
+          resolved = fromRight' (resolveDispute disputed afterChallenge)
+      chStatus resolved `shouldBe` Closed
+      chLatestState resolved `shouldBe` chDisputeState disputed
 
     it "rejects dispute resolution before challenge period expires" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch keysA keysB PartyA 200
-          Right disputed = unilateralClose ch1 ss1 t0
-          duringChallenge = addUTCTime 5 t0  -- only 5 seconds, need 10
+          (ch1, ss1) = fromRight' (createPayment ch keysA keysB PartyA 200)
+          disputed = fromRight' (unilateralClose ch1 ss1 t0)
+          duringChallenge = addUTCTime 5 t0
       resolveDispute disputed duringChallenge
         `shouldBe` Left DisputePeriodActive
 
     it "allows resolution exactly at deadline" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch keysA keysB PartyA 200
-          Right disputed = unilateralClose ch1 ss1 t0
-          atDeadline = addUTCTime 10 t0  -- exactly at deadline
-      case resolveDispute disputed atDeadline of
-        Left err -> expectationFailure $ show err
-        Right resolved -> chStatus resolved `shouldBe` Closed
+          (ch1, ss1) = fromRight' (createPayment ch keysA keysB PartyA 200)
+          disputed = fromRight' (unilateralClose ch1 ss1 t0)
+          atDeadline = addUTCTime 10 t0
+          resolved = fromRight' (resolveDispute disputed atDeadline)
+      chStatus resolved `shouldBe` Closed
 
     it "rejects resolveDispute on non-disputed channel (Active)" $ do
       let (ch, _keysA, _keysB) = setupActiveChannel
@@ -765,13 +820,13 @@ main = hspec $ do
     it "rejects resolveDispute on open channel" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
       resolveDispute ch t0
         `shouldBe` Left (InvalidChannelStatus Disputed Open)
 
     it "rejects resolveDispute on closed channel" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right closed = cooperativeClose ch keysA keysB
+          closed = fromRight' (cooperativeClose ch keysA keysB)
       resolveDispute closed t0
         `shouldBe` Left (InvalidChannelStatus Disputed Closed)
 
@@ -782,13 +837,29 @@ main = hspec $ do
         `shouldBe` Left DisputePeriodActive
 
   ---------------------------------------------------------------------------
+  -- Channel.Dispute - Defensive / inconsistent-state branches
+  ---------------------------------------------------------------------------
+  describe "Channel.Dispute - Defensive branches" $ do
+    it "counterDispute returns ChannelNotFound when dispute state is missing" $ do
+      let (ch, keysA, keysB) = setupActiveChannel
+          (_, ss1) = fromRight' (createPayment ch keysA keysB PartyA 200)
+          noDisputeStateCh = mkDisputedChannelNoDisputeState
+      counterDispute noDisputeStateCh ss1 (addUTCTime 1 t0)
+        `shouldBe` Left ChannelNotFound
+
+    it "resolveDispute returns ChannelNotFound when deadline is missing" $ do
+      let noDeadlineCh = mkDisputedChannelNoDeadline
+      resolveDispute noDeadlineCh t0
+        `shouldBe` Left ChannelNotFound
+
+  ---------------------------------------------------------------------------
   -- Channel.Dispute - isChallengePeriodExpired
   ---------------------------------------------------------------------------
   describe "Channel.Dispute - isChallengePeriodExpired" $ do
     it "returns False when no deadline is set" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
+          ch = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
       isChallengePeriodExpired ch t0 `shouldBe` False
 
     it "returns False for active channel without dispute" $ do
@@ -817,70 +888,45 @@ main = hspec $ do
   describe "Channel.Dispute - Full lifecycle" $ do
     it "allows unilateral close and starts challenge period" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch  keysA keysB PartyA 200
-      case unilateralClose ch1 ss1 t0 of
-        Left err -> expectationFailure $ show err
-        Right disputed -> do
-          chStatus disputed `shouldBe` Disputed
-          chDisputeDeadline disputed `shouldSatisfy` (/= Nothing)
+          (ch1, ss1) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          disputed = fromRight' (unilateralClose ch1 ss1 t0)
+      chStatus disputed `shouldBe` Disputed
+      chDisputeDeadline disputed `shouldSatisfy` (/= Nothing)
 
     it "full dispute-counter-resolve lifecycle works" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, ss2) = createPayment ch1 keysA keysB PartyB 100
-          Right (ch3, ss3) = createPayment ch2 keysA keysB PartyA 50
-      -- Step 1: raiseDispute with old state
-      case raiseDispute ch3 ss1 t0 of
-        Left err -> expectationFailure $ show err
-        Right disputed -> do
-          chStatus disputed `shouldBe` Disputed
-          -- Step 2: counter with newer state
-          case counterDispute disputed ss3 (addUTCTime 2 t0) of
-            Left err -> expectationFailure $ show err
-            Right countered -> do
-              -- Step 3: resolve after challenge period
-              case resolveDispute countered (addUTCTime 20 t0) of
-                Left err -> expectationFailure $ show err
-                Right resolved -> do
-                  chStatus resolved `shouldBe` Closed
-                  case chLatestState resolved of
-                    Nothing -> expectationFailure "Expected final state"
-                    Just ss -> do
-                      csNonce (ssState ss) `shouldBe` 3
-                      csBalance (ssState ss) `shouldBe` Balance 850 650
+          (ch1, ss1) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, _) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          (ch3, ss3) = fromRight' (createPayment ch2 keysA keysB PartyA 50)
+          disputed = fromRight' (raiseDispute ch3 ss1 t0)
+          countered = fromRight' (counterDispute disputed ss3 (addUTCTime 2 t0))
+          resolved = fromRight' (resolveDispute countered (addUTCTime 20 t0))
+      chStatus resolved `shouldBe` Closed
+      let ss = fromJust' (chLatestState resolved)
+      csNonce (ssState ss) `shouldBe` 3
+      csBalance (ssState ss) `shouldBe` Balance 850 650
 
     it "dispute without counter resolves to original dispute state" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch keysA keysB PartyA 200
-      case raiseDispute ch1 ss1 t0 of
-        Left err -> expectationFailure $ show err
-        Right disputed ->
-          case resolveDispute disputed (addUTCTime 20 t0) of
-            Left err -> expectationFailure $ show err
-            Right resolved -> do
-              chStatus resolved `shouldBe` Closed
-              case chLatestState resolved of
-                Nothing -> expectationFailure "Expected final state"
-                Just ss -> do
-                  csNonce (ssState ss) `shouldBe` 1
-                  csBalance (ssState ss) `shouldBe` Balance 800 700
+          (ch1, ss1) = fromRight' (createPayment ch keysA keysB PartyA 200)
+          disputed = fromRight' (raiseDispute ch1 ss1 t0)
+          resolved = fromRight' (resolveDispute disputed (addUTCTime 20 t0))
+      chStatus resolved `shouldBe` Closed
+      let ss = fromJust' (chLatestState resolved)
+      csNonce (ssState ss) `shouldBe` 1
+      csBalance (ssState ss) `shouldBe` Balance 800 700
 
     it "multiple counter-disputes work correctly" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, ss1) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, ss2) = createPayment ch1 keysA keysB PartyB 100
-          Right (ch3, ss3) = createPayment ch2 keysA keysB PartyA 50
-          -- Dispute with nonce 1
-          Right disputed = unilateralClose ch3 ss1 t0
-          -- First counter with nonce 2
-          Right countered1 = counterDispute disputed ss2 (addUTCTime 1 t0)
-          -- Second counter with nonce 3
-          Right countered2 = counterDispute countered1 ss3 (addUTCTime 2 t0)
-      case chDisputeState countered2 of
-        Nothing -> expectationFailure "Expected dispute state"
-        Just ss -> do
-          csNonce (ssState ss) `shouldBe` 3
-          csBalance (ssState ss) `shouldBe` Balance 850 650
+          (ch1, ss1) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, ss2) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          (ch3, ss3) = fromRight' (createPayment ch2 keysA keysB PartyA 50)
+          disputed = fromRight' (unilateralClose ch3 ss1 t0)
+          countered1 = fromRight' (counterDispute disputed ss2 (addUTCTime 1 t0))
+          countered2 = fromRight' (counterDispute countered1 ss3 (addUTCTime 2 t0))
+      let ss = fromJust' (chDisputeState countered2)
+      csNonce (ssState ss) `shouldBe` 3
+      csBalance (ssState ss) `shouldBe` Balance 850 650
 
   ---------------------------------------------------------------------------
   -- Channel.State - defaultConfig usage
@@ -889,13 +935,11 @@ main = hspec $ do
     it "uses 24-hour challenge period from defaultConfig" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch = openChannel "chan-def" keysA (pkPublic keysB) 1000 defaultConfig
-          Right active = activateChannel ch keysA keysB 500
-          Right (ch1, ss1) = createPayment active keysA keysB PartyA 200
-          Right disputed = unilateralClose ch1 ss1 t0
-      -- Should NOT be expired after 12 hours (43200 seconds)
+          ch = fromRight' (openChannel "chan-def" keysA (pkPublic keysB) 1000 defaultConfig)
+          active = fromRight' (activateChannel ch keysA keysB 500)
+          (ch1, ss1) = fromRight' (createPayment active keysA keysB PartyA 200)
+          disputed = fromRight' (unilateralClose ch1 ss1 t0)
       isChallengePeriodExpired disputed (addUTCTime 43200 t0) `shouldBe` False
-      -- Should be expired after 24 hours (86400 seconds)
       isChallengePeriodExpired disputed (addUTCTime 86400 t0) `shouldBe` True
 
   ---------------------------------------------------------------------------
@@ -905,58 +949,46 @@ main = hspec $ do
     it "handles deposit of 1 (minimum valid)" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-      case openChannel "chan-min" keysA (pkPublic keysB) 1 testConfig of
-        Left err -> expectationFailure $ show err
-        Right ch -> do
-          chStatus ch `shouldBe` Open
-          balanceA (chDeposits ch) `shouldBe` 1
+          ch = fromRight' (openChannel "chan-min" keysA (pkPublic keysB) 1 testConfig)
+      chStatus ch `shouldBe` Open
+      balanceA (chDeposits ch) `shouldBe` 1
 
     it "handles very large deposits" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-      case openChannel "chan-big" keysA (pkPublic keysB) 999999999999 testConfig of
-        Left err -> expectationFailure $ show err
-        Right ch -> do
-          balanceA (chDeposits ch) `shouldBe` 999999999999
+          ch = fromRight' (openChannel "chan-big" keysA (pkPublic keysB) 999999999999 testConfig)
+      balanceA (chDeposits ch) `shouldBe` 999999999999
 
     it "payment of exactly 1 unit works" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-      case createPayment ch keysA keysB PartyA 1 of
-        Left err -> expectationFailure $ show err
-        Right (ch', _) ->
-          channelBalance ch' `shouldBe` Just (Balance 999 501)
+          (ch', _) = fromRight' (createPayment ch keysA keysB PartyA 1)
+      channelBalance ch' `shouldBe` Just (Balance 999 501)
 
     it "multiple payments that drain one party entirely" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          -- PartyA has 1000, send it all to B
-          Right (ch1, _) = createPayment ch keysA keysB PartyA 1000
+          (ch1, _) = fromRight' (createPayment ch keysA keysB PartyA 1000)
       channelBalance ch1 `shouldBe` Just (Balance 0 1500)
-      -- Now A can't send any more
       createPayment ch1 keysA keysB PartyA 1
         `shouldBe` Left (InsufficientBalance PartyA 1)
-      -- But B can send back
-      case createPayment ch1 keysA keysB PartyB 500 of
-        Left err -> expectationFailure $ show err
-        Right (ch2, _) ->
-          channelBalance ch2 `shouldBe` Just (Balance 500 1000)
+      let (ch2, _) = fromRight' (createPayment ch1 keysA keysB PartyB 500)
+      channelBalance ch2 `shouldBe` Just (Balance 500 1000)
 
     it "balance sum is preserved through payments" $ do
       let (ch, keysA, keysB) = setupActiveChannel
           initialTotal = totalDeposits ch
-          Right (ch1, _) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, _) = createPayment ch1 keysA keysB PartyB 100
-          Right (ch3, _) = createPayment ch2 keysA keysB PartyA 50
-      case channelBalance ch3 of
-        Nothing -> expectationFailure "Expected balance"
-        Just b -> (balanceA b + balanceB b) `shouldBe` initialTotal
+          (ch1, _) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, _) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          (ch3, _) = fromRight' (createPayment ch2 keysA keysB PartyA 50)
+          b = fromJust' (channelBalance ch3)
+      (balanceA b + balanceB b) `shouldBe` initialTotal
 
     it "channel ID is preserved through lifecycle" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch1 = openChannel "my-unique-id" keysA (pkPublic keysB) 1000 testConfig
-          Right ch2 = activateChannel ch1 keysA keysB 500
-          Right (ch3, _) = createPayment ch2 keysA keysB PartyA 200
-          Right ch4 = cooperativeClose ch3 keysA keysB
+          ch1 = fromRight' (openChannel "my-unique-id" keysA (pkPublic keysB) 1000 testConfig)
+          ch2 = fromRight' (activateChannel ch1 keysA keysB 500)
+          (ch3, _) = fromRight' (createPayment ch2 keysA keysB PartyA 200)
+          ch4 = fromRight' (cooperativeClose ch3 keysA keysB)
       chId ch1 `shouldBe` "my-unique-id"
       chId ch2 `shouldBe` "my-unique-id"
       chId ch3 `shouldBe` "my-unique-id"
@@ -965,9 +997,9 @@ main = hspec $ do
     it "party keys are preserved through lifecycle" $ do
       let keysA = makeTestKeys "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           keysB = makeTestKeys "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-          Right ch1 = openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig
-          Right ch2 = activateChannel ch1 keysA keysB 500
-          Right (ch3, _) = createPayment ch2 keysA keysB PartyA 200
+          ch1 = fromRight' (openChannel "chan-1" keysA (pkPublic keysB) 1000 testConfig)
+          ch2 = fromRight' (activateChannel ch1 keysA keysB 500)
+          (ch3, _) = fromRight' (createPayment ch2 keysA keysB PartyA 200)
       chPartyA ch1 `shouldBe` pkPublic keysA
       chPartyB ch1 `shouldBe` pkPublic keysB
       chPartyA ch2 `shouldBe` pkPublic keysA
@@ -981,24 +1013,18 @@ main = hspec $ do
   describe "Signature integrity" $ do
     it "latest signed state is always verifiable after payment" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-          Right (ch1, _) = createPayment ch  keysA keysB PartyA 200
-          Right (ch2, _) = createPayment ch1 keysA keysB PartyB 100
-          Right (ch3, _) = createPayment ch2 keysA keysB PartyA 50
-      case chLatestState ch3 of
-        Nothing -> expectationFailure "Expected state"
-        Just ss ->
-          verifySignedState (pkPublic keysA) (pkPublic keysB) ss `shouldBe` True
+          (ch1, _) = fromRight' (createPayment ch  keysA keysB PartyA 200)
+          (ch2, _) = fromRight' (createPayment ch1 keysA keysB PartyB 100)
+          (ch3, _) = fromRight' (createPayment ch2 keysA keysB PartyA 50)
+          ss = fromJust' (chLatestState ch3)
+      verifySignedState (pkPublic keysA) (pkPublic keysB) ss `shouldBe` True
 
     it "initial state after activation is verifiable" $ do
       let (ch, keysA, keysB) = setupActiveChannel
-      case chLatestState ch of
-        Nothing -> expectationFailure "Expected initial state"
-        Just ss ->
-          verifySignedState (pkPublic keysA) (pkPublic keysB) ss `shouldBe` True
+          ss = fromJust' (chLatestState ch)
+      verifySignedState (pkPublic keysA) (pkPublic keysB) ss `shouldBe` True
 
     it "dispute state is verifiable" $ do
       let (disputed, keysA, keysB, _ss) = setupDisputedChannel
-      case chDisputeState disputed of
-        Nothing -> expectationFailure "Expected dispute state"
-        Just ss ->
-          verifySignedState (pkPublic keysA) (pkPublic keysB) ss `shouldBe` True
+          ss = fromJust' (chDisputeState disputed)
+      verifySignedState (pkPublic keysA) (pkPublic keysB) ss `shouldBe` True
